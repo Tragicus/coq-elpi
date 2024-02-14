@@ -594,8 +594,6 @@ let infer_conv_noticing_evars ~pb ~ts env sigma t1 t2 =
     if !has_evar then None
     else Some (UnifFailure (sigma, UnifUnivInconsistency e))
 
-let pr_econstr = ref (fun _ _ _ -> Pp.str "unable to print econstr")
-
 (* TODO: move to a proper place *)
 let rec split_at n acc l =
    if n = 0 then (List.rev acc, l)
