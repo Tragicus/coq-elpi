@@ -1483,6 +1483,13 @@ external pred coq.redflags.sub i:coq.redflags, i:list coq.redflag,
 % - @redflags! (default coq.redflags.all)
 external pred coq.reduction.lazy.whd i:term, o:term.
 
+% [coq.reduction.lazy.whd_betaiota_deltazeta_for_iota_state T Tred] Puts T
+% in weak head normal form.
+% Supported attributes:
+% - @redflags! (default coq.redflags.all)
+external pred coq.reduction.lazy.whd_betaiota_deltazeta_for_iota_state 
+i:term, o:term.
+
 % [coq.reduction.lazy.norm T Tred] Puts T in normal form.
 % Supported attributes:
 % - @redflags! (default coq.redflags.all)
