@@ -230,21 +230,17 @@ let activate_hook ~name =
 let apply_hooks env sigma proj pat =
   List.find_map (fun name -> CString.Map.get name !all_hooks env sigma proj pat) !active_hooks
 
-let conv_record_skip flags env sigma t sk =
-   match EConstr.kind sigma t with
-   | Proj (p, _, c) -> let c = whd_all env sigma c in
-      begin try let (hd, args) = destApp sigma c in
-         isConstruct sigma hd || is_ground_term sigma (args.(Projection.npars p + Projection.arg p))
-      with _ -> is_ground_term sigma c end
-   | Const (cn, _) when Structures.Structure.is_projection cn ->
-      begin match Stack.strip_n_app (Structures.Structure.projection_nparams cn) sk with
-      | Some (_, c, _) -> let c = whd_all env sigma c in
-        begin try let (hd, _) = destApp sigma c in
-          let x = Stack.zip sigma (whd_betaiota_deltazeta_for_iota_state flags.open_ts env sigma (t, sk)) in
-          isConstruct sigma hd || is_ground_term sigma x
-        with _ -> is_ground_term sigma c end
-      | _ -> false end
-   | _ -> false
+let rec value_pattern_of_constr sigma t =
+  match EConstr.kind sigma t with
+  | App (f,vargs) ->
+    let patt, n, args = value_pattern_of_constr sigma f in
+    patt, n, args @ Array.to_list vargs
+  | Rel n -> ValuePattern.Default_cs, Some n, []
+  | Lambda (_, _, b) -> let patt, _, _ = value_pattern_of_constr sigma b in patt, None, []
+  | Prod (_,_,_) -> ValuePattern.Prod_cs, None, [t]
+  | Proj (p, _, c) -> ValuePattern.Proj_cs (Names.Projection.repr p), None, [c]
+  | Sort s -> ValuePattern.Sort_cs (EConstr.ESorts.family sigma s), None, []
+  | _ -> ValuePattern.Const_cs (fst @@ EConstr.destRef sigma t) , None, []
 
 (* [check_conv_record flags env sigma (t1,stack1) (t2,stack2)] tries to decompose
    the problem (t1 stack1) = (t2 stack2) into a problem
@@ -266,67 +262,67 @@ let conv_record_skip flags env sigma t sk =
    object c in structure R (since, if c1 were not an evar, the
    projection would have been reduced) *)
 
-let check_conv_record flags env sigma (t1,sk1) (t2,sk2) =
-  let () = if conv_record_skip flags env sigma t1 sk1 then raise Not_found else () in
-  let open ValuePattern in
-  let (proji, u), arg = Termops.global_app_of_constr sigma t1 in
-  let t2, sk2' = decompose_app sigma (shrink_eta sigma t2) in
-  let sk2 = Stack.append_app sk2' sk2 in
-  let (sigma, solution), sk2_effective =
-    let t2 =
-      let rec remove_lambda t2 =
-        match EConstr.kind sigma t2 with
-        | Lambda (_,_,t2) -> remove_lambda t2
-        | Cast (t2,_,_) -> remove_lambda t2
-        | App (t2,_) -> t2
-        | _ -> t2 in
-      if Stack.is_empty sk2 then remove_lambda t2 else t2 in
-    try begin try
-      match EConstr.kind sigma t2 with
-        Prod (_,_,_) -> (* assert (l2=[]); *)
-            CanonicalSolution.find env sigma (proji, Prod_cs),
-            (Stack.append_app [|t2|] Stack.empty)
-      | Sort s ->
-        let s = ESorts.kind sigma s in
-        CanonicalSolution.find env sigma
-          (proji, Sort_cs (Sorts.family s)),[]
-      | Proj (p, _, c) ->
-        CanonicalSolution.find env sigma(proji, Proj_cs (Names.Projection.repr p)), Stack.append_app [|c|] sk2
-      | _ ->
-        let (c2, _) = try destRef sigma t2 with DestKO -> raise Not_found in
-          CanonicalSolution.find env sigma (proji, Const_cs c2),sk2
-    with Not_found ->
-      CanonicalSolution.find env sigma (proji,Default_cs), [] end
-    with Not_found ->
-      match (apply_hooks env sigma (t1, sk1) (t2, sk2)) with
-      | Some r -> r, sk2
-      | None -> raise Not_found
-  in
-  let open CanonicalSolution in
+let check_conv_record env sigma (t1,sk1) (t2,sk2) =
+   (* I only recognize ConstRef projections since these are the only ones for which
+      I know how to obtain the number of parameters. *)
+  let (proji, _), arg =
+    match Termops.global_app_of_constr sigma t1 with
+    | (Names.GlobRef.ConstRef proji, u), arg -> (proji, u), arg
+    | _ -> raise Not_found in
+  (* Given a ConstRef projection, I obtain the structure it is a projection from. *)
+  let structure = Structures.Structure.find_from_projection proji in
+  (* Knowing the structure and hence its number of arguments, I can cut sk1 into pieces. *)
   let params1, c1, extra_args1 =
     match arg with
     | Some c -> (* A primitive projection applied to c *)
-      let ty = Retyping.get_type_of ~lax:true env sigma c in
-      let (i,u), ind_args =
+      let ty =
+        try Retyping.get_type_of ~lax:true env sigma c with
+        | Retyping.RetypeError _ -> raise Not_found
+      in let (i, u), ind_args =
         (* Are we sure that ty is not an evar? *)
         Inductiveops.find_mrectype env sigma ty
       in ind_args, c, sk1
     | None ->
-      match Stack.strip_n_app solution.nparams sk1 with
-      | Some (params1, c1, extra_args1) -> (Option.get @@ Stack.list_of_app_stack params1), c1, extra_args1
+      match Reductionops.Stack.strip_n_app structure.nparams sk1 with
+      | Some (params1, c1, extra_args1) -> (Option.get @@ Reductionops.Stack.list_of_app_stack params1), c1, extra_args1
       | _ -> raise Not_found in
-  let us2,extra_args2 =
-    let l_us = List.length solution.cvalue_arguments in
-      if Int.equal l_us 0 then [], sk2_effective
-      else match (Stack.strip_n_app (l_us-1) sk2_effective) with
-      | None -> raise Not_found
-      | Some (l',el,s') -> ((Option.get @@ Stack.list_of_app_stack l') @ [el],s') in
+  (* If the projection reduces or if there is nothing to infer, we leave early. *)
+  (* Maybe I should return something instead of failing. *)
+  let () = let (hd, args) = decompose_app sigma c1 in
+    (* TODO: This is wrong, I need to check that hd is the constructor of the structure we are looking for. *)
+    
+    if isConstruct sigma hd || is_ground_term sigma c1 then raise Not_found else () in
+  let h2, sk2' = decompose_app sigma (shrink_eta sigma t2) in
+  let sk2 = Stack.append_app sk2' sk2 in
+  let k = Reductionops.Stack.args_size sk2 - Reductionops.Stack.args_size extra_args1 in
+  (* Knowing the shape of extra_args1, I can cut sk2 into pieces, extracting extra_args2 from it. *)
+  let args2, extra_args2 =
+    if k = 0 then [], sk2
+    else if k < 0 then raise Not_found
+    else match Reductionops.Stack.strip_n_app (k-1) sk2 with
+    | None -> raise Not_found
+    | Some (l',el,s') -> ((Option.get @@ Reductionops.Stack.list_of_app_stack l') @ [el], s') in
+  let (pat, _, args2') = value_pattern_of_constr sigma h2 in
+  let (sigma, solution), sk2_effective =
+     (* N.B. In the `Proj` case, the subject needs to be added in args2. *)
+    try begin try 
+      let (sigma, solution) = CanonicalSolution.find env sigma (Names.GlobRef.ConstRef proji, pat) in
+      if List.length solution.cvalue_arguments = k + (List.length args2') then (sigma, solution), args2' @ args2 else raise Not_found
+    with | Not_found | DestKO ->
+      let (sigma, solution) = CanonicalSolution.find env sigma (Names.GlobRef.ConstRef proji, Default_cs) in
+      (* We have to drop the arguments args2 because the default solution does not have them. *)
+      if List.length solution.cvalue_arguments = 0 then (sigma, solution), [] else raise Not_found end
+     with | Not_found -> 
+       match (apply_hooks env sigma (t1, sk1) (t2, sk2)) with
+       | Some r -> r, args2' @ args2
+       | None -> raise Not_found
+  in
+  let t2 = Stack.zip sigma (h2, (Stack.append_app_list args2 Stack.empty)) in
   let h, _ = decompose_app sigma solution.body in
-  let t2 = Stack.zip sigma (t2,sk2) in
-  let h2, _ = decompose_app sigma t2 in
     sigma,(h, h2),solution.constant,solution.abstractions_ty,(solution.params,params1),
-    (solution.cvalue_arguments,us2),(extra_args1,extra_args2),c1,
+    (solution.cvalue_arguments, sk2_effective),(extra_args1,extra_args2),c1,
     (solution.cvalue_abstraction, t2)
+
 
 (* Precondition: one of the terms of the pb is an uninstantiated evar,
  * possibly applied to arguments. *)
@@ -1031,8 +1027,8 @@ and evar_eqappr_x ?(rhs_is_already_stuck = false) flags env evd pbty
           (try
              if not flags.with_cs then raise Not_found
              else conv_record flags env
-               (try check_conv_record flags env i appr1 appr2
-               with Not_found -> check_conv_record flags env i appr2 appr1)
+               (try check_conv_record env i appr1 appr2
+               with Not_found -> check_conv_record env i appr2 appr1)
             with Not_found -> UnifFailure (i,NoCanonicalStructure))
         and f3 i =
           (* heuristic: unfold second argument first, exception made
@@ -1093,7 +1089,7 @@ and evar_eqappr_x ?(rhs_is_already_stuck = false) flags env evd pbty
         let f3 i =
           (try
              if not flags.with_cs then raise Not_found
-             else conv_record flags env (check_conv_record flags env i appr1 appr2)
+             else conv_record flags env (check_conv_record env i appr1 appr2)
            with Not_found -> UnifFailure (i,NoCanonicalStructure))
 
         and f4 i =
@@ -1108,7 +1104,7 @@ and evar_eqappr_x ?(rhs_is_already_stuck = false) flags env evd pbty
         let f3 i =
           (try
              if not flags.with_cs then raise Not_found
-             else conv_record flags env (check_conv_record flags env i appr2 appr1)
+             else conv_record flags env (check_conv_record env i appr2 appr1)
            with Not_found -> UnifFailure (i,NoCanonicalStructure))
         and f4 i =
           evar_eqappr_x flags env i pbty appr1
