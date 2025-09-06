@@ -288,12 +288,11 @@ namespace tc {
 
       func context goal-ctx -> list prop.
       context [] [].
-      context [X | Xs] Clauses :-
+      context [X | Xs] [Clause | ResTl] :-
         (decl Var _ Ty = X; def Var _ Ty _ = X),
         tc.is-instance-term Ty, !,
         std.assert! (compile.instance Ty Var Clause) "[TC] cannot compile instance of context",
-        context Xs ResTl,
-        Clauses = [Clause|ResTl].
+        context Xs ResTl.
       context [_ | Tl] L :- context Tl L.
     }
 
@@ -316,7 +315,7 @@ namespace tc {
     % If the instance is polymorphic, we wrap its gref into the pglobal constructor
     instance-gr InstGR (pi x\ Clause x) :- coq.env.univpoly? InstGR _, !,
       coq.env.typeof InstGR Ty,
-      (pi x\ tc.compile.instance Ty (pglobal InstGR x) (Clause x)).
+      pi x\ tc.compile.instance Ty (pglobal InstGR x) (Clause x).
     instance-gr InstGR Clause :-
       coq.env.typeof InstGR Ty,
       tc.compile.instance Ty (global InstGR) Clause.
