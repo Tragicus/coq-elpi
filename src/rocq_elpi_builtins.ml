@@ -3748,6 +3748,19 @@ Supported attributes:
 
   LPDoc "-- Coq's reduction machines ------------------------------------";
 
+  MLCode(Pred("coq.reduction.whd-betaiota-deltazeta-for-iota-state",
+    CIn(term,"T",
+    COut(term,"Tred",
+    Read(proof_context, {|Puts T in weak head beta-iota-normal form, beta-iota-delta-zeta reducing match arguments.
+Supported attributes:
+- @redflags! (default coq.redflags.all)|}))),
+    (fun t _ ~depth proof_context constraints state ->
+       let sigma = get_sigma state in
+       let flags = Option.default RedFlags.all proof_context.options.redflags in
+       let t = Reductionops.Stack.zip sigma (Reductionops.whd_betaiota_deltazeta_for_iota_state TransparentState.full proof_context.env sigma (t, Reductionops.Stack.empty)) in
+       !: t)),
+  DocAbove);
+
   MLCode(Pred("coq.reduction.lazy.whd",
     CIn(term,"T",
     COut(term,"Tred",
